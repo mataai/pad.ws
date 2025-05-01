@@ -9,7 +9,6 @@ from config import (
     OIDC_CLIENT_ID,
     OIDC_CLIENT_SECRET,
     OIDC_CONFIG,
-    OIDC_REDIRECT_URI,
     STATIC_DIR,
     get_auth_url,
     sessions,
@@ -40,7 +39,7 @@ async def newLogin(request: Request, popup: str = None):
     responseParams = {
         "client_id": OIDC_CLIENT_ID,
         "response_type": "code",
-        "redirect_uri": OIDC_REDIRECT_URI,
+        "redirect_uri": request.base_url._url + "auth/callback",
         "scope": "openid profile email offline_access",
         "state": state,
     }
@@ -66,7 +65,7 @@ async def callback(request: Request, code: str, state: str = "default"):
             data={
                 "grant_type": "authorization_code",
                 "code": code,
-                "redirect_uri": OIDC_REDIRECT_URI,
+                "redirect_uri": request.base_url._url + "auth/callback",
                 "client_id": OIDC_CLIENT_ID,
                 "client_secret": OIDC_CLIENT_SECRET,
             },
@@ -100,18 +99,28 @@ async def callback(request: Request, code: str, state: str = "default"):
         else:
             return RedirectResponse("/api/user/me")
 
+
 @auth_router.get("/logout")
 async def logout(request: Request):
     session_id = request.cookies.get("session_id")
+    
+    if OIDC_CONFIG["end_session_endpoint"]:
+        end_session_url = OIDC_CONFIG["end_session_endpoint"]
+        params = {
+            "id_token_hint": sessions[session_id]["id_token"],
+            "post_logout_redirect_uri": request.base_url._url,
+        }
+        
+        end_session_url += "?" + "&".join(
+            f"{key}={value}" for key, value in params.items()
+        )
+
+
     if session_id in sessions:
         del sessions[session_id]
-
-    # Create a response that doesn't redirect but still clears the cookie
-    from fastapi.responses import JSONResponse
-
-    response = JSONResponse(
-        {"status": "success", "message": "Logged out successfully"}
-    )
+        
+    response = RedirectResponse(end_session_url)
+    
 
     # Clear the session_id cookie with all necessary parameters
     response.delete_cookie(
@@ -121,5 +130,5 @@ async def logout(request: Request):
         secure=request.url.scheme == "https",
         httponly=True,
     )
-
+    
     return response
