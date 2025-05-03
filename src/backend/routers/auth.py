@@ -1,7 +1,7 @@
 import secrets
 import httpx
-from fastapi import APIRouter, Request, HTTPException, status
-from fastapi.responses import RedirectResponse, FileResponse
+from fastapi import APIRouter, Request, HTTPException
+from fastapi.responses import RedirectResponse, FileResponse, JSONResponse
 import os
 import jwt
 
@@ -11,7 +11,9 @@ from config import (
     OIDC_CONFIG,
     STATIC_DIR,
     get_auth_url,
-    sessions,
+    set_session,
+    delete_session,
+    get_session,
 )
 from coder import CoderAPI
 
@@ -60,7 +62,7 @@ async def callback(request: Request, code: str, state: str = "default"):
 
     # Exchange authorization code for access token
     async with httpx.AsyncClient() as client:
-        response = await client.post(
+        token_response = await client.post(
             OIDC_CONFIG["token_endpoint"],
             data={
                 "grant_type": "authorization_code",
@@ -71,16 +73,13 @@ async def callback(request: Request, code: str, state: str = "default"):
             },
         )
 
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid token request",
-            )
+        if token_response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Auth failed")
 
-        response_data = response.json()
-
-        sessions[session_id] = response_data
-        access_token = response_data["access_token"]
+        token_data = token_response.json()
+        expiry = token_data["expires_in"]
+        set_session(session_id, token_data, expiry)
+        access_token = token_data["access_token"]
         user_info = jwt.decode(
             access_token, options={"verify_signature": False}
         )
@@ -92,43 +91,37 @@ async def callback(request: Request, code: str, state: str = "default"):
             print(f"Error in user/workspace setup: {str(e)}")
             # Continue with login even if Coder API fails
 
-        if state == "popup":
-            return FileResponse(
-                os.path.join(STATIC_DIR or "", "auth/popup-close.html")
-            )
-        else:
-            return RedirectResponse("/api/user/me")
+    if state == "popup":
+        return FileResponse(os.path.join(STATIC_DIR, "auth/popup-close.html"))
+    else:
+        return RedirectResponse("/")
 
 
 @auth_router.get("/logout")
 async def logout(request: Request):
     session_id = request.cookies.get("session_id")
-    
-    if OIDC_CONFIG["end_session_endpoint"]:
-        end_session_url = OIDC_CONFIG["end_session_endpoint"]
-        params = {
-            "id_token_hint": sessions[session_id]["id_token"],
-            "post_logout_redirect_uri": request.base_url._url,
-        }
-        
-        end_session_url += "?" + "&".join(
-            f"{key}={value}" for key, value in params.items()
-        )
 
+    session_data = get_session(session_id)
+    if not session_data:
+        return RedirectResponse("/")
 
-    if session_id in sessions:
-        del sessions[session_id]
-        
-    response = RedirectResponse(end_session_url)
-    
+    id_token = session_data.get("id_token", "")
 
-    # Clear the session_id cookie with all necessary parameters
-    response.delete_cookie(
-        key="session_id",
-        path="/",
-        domain=None,  # Use None to match the current domain
-        secure=request.url.scheme == "https",
-        httponly=True,
+    # Delete the session from Redis
+    delete_session(session_id)
+
+    # Create the Keycloak logout URL with redirect back to our app
+    logout_url = f"{OIDC_CONFIG['server_url']}/realms/{OIDC_CONFIG['realm']}/protocol/openid-connect/logout"
+    redirect_uri = OIDC_CONFIG[
+        "frontend_url"
+    ]  # Match the frontend redirect URI
+    full_logout_url = f"{logout_url}?id_token_hint={id_token}&post_logout_redirect_uri={redirect_uri}"
+
+    logout_url = OIDC_CONFIG["end_session_endpoint"]
+    redirect_uri = request.base_url._url
+
+    # Create a redirect response to Keycloak's logout endpoint
+    response = JSONResponse(
+        {"status": "success", "logout_url": full_logout_url}
     )
-    
     return response

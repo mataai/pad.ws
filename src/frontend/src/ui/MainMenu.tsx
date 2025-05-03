@@ -137,33 +137,67 @@ export const MainMenuConfig: React.FC<MainMenuConfigProps> = ({
     setShowAccountModal(true);
   };
 
-  const handleGridToggle = () => {
-    if (!excalidrawAPI) return;
-    const appState = excalidrawAPI.getAppState();
-    appState.gridModeEnabled = !appState.gridModeEnabled;
-    appState.gridSize = 20;
-    appState.gridStep = 5;
-    excalidrawAPI.updateScene({
-      appState: appState
-    });
-  };
+  const handleLogout = async () => {
+    capture('logout_clicked');
+    
+    try {
+      // Call the logout endpoint and get the logout_url
+      const response = await fetch('/auth/logout', { 
+        method: 'GET',
+        credentials: 'include' 
+      });
+      const data = await response.json();
+      const keycloakLogoutUrl = data.logout_url;
+      
+      // Create a function to create an iframe and return a promise that resolves when it loads or times out
+      const createIframeLoader = (url: string, debugName: string): Promise<void> => {
+        return new Promise<void>((resolve) => {
+          const iframe = document.createElement("iframe");
+          iframe.style.display = "none";
+          iframe.src = url;
+          console.debug(`[pad.ws] (Silently) Priming ${debugName} logout for ${url}`);
 
-  const handleZenModeToggle = () => {
-    if (!excalidrawAPI) return;
-    const appState = excalidrawAPI.getAppState();
-    appState.zenModeEnabled = !appState.zenModeEnabled;
-    excalidrawAPI.updateScene({
-      appState: appState
-    });
-  };
+          const cleanup = () => {
+            if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+            resolve();
+          };
 
-  const handleViewModeToggle = () => {
-    if (!excalidrawAPI) return;
-    const appState = excalidrawAPI.getAppState();
-    appState.viewModeEnabled = !appState.viewModeEnabled;
-    excalidrawAPI.updateScene({
-      appState: appState
-    });
+          iframe.onload = cleanup;
+          // Fallback: remove iframe after 2s if onload doesn't fire
+          const timeoutId = window.setTimeout(cleanup, 2000);
+
+          // Also clean up if the iframe errors
+          iframe.onerror = () => {
+            clearTimeout(timeoutId);
+            cleanup();
+          };
+
+          // Add the iframe to the DOM
+          document.body.appendChild(iframe);
+        });
+      };
+
+      // Create a promise for Keycloak logout iframe
+      const promises = [];
+
+      // Add Keycloak logout iframe
+      promises.push(createIframeLoader(keycloakLogoutUrl, "Keycloak"));
+
+      // Wait for both iframes to complete
+      await Promise.all(promises);
+
+      // Wait for the iframe to complete
+      await Promise.all(promises);
+            
+      // Invalidate auth query to show the AuthModal
+      queryClient.invalidateQueries({ queryKey: ['auth'] });
+      queryClient.invalidateQueries({ queryKey: ['userProfile'] });
+      
+      // No need to redirect to the logout URL since we're already handling it via iframe
+      console.log("Logged out successfully");
+    } catch (error) {
+      console.error("Logout failed:", error);
+    }
   };
 
   return (
@@ -239,30 +273,6 @@ export const MainMenuConfig: React.FC<MainMenuConfigProps> = ({
           Action Button
         </MainMenu.Item>
       </MainMenu.Group>
-
-      <MainMenu.Separator />
-      
-      <MainMenu.Group title="View">
-        <MainMenu.Item
-          icon={<Grid2x2 />}
-          onClick={handleGridToggle}
-        >
-         Toggle grid
-        </MainMenu.Item>
-        <MainMenu.Item
-          icon={<Eye />}
-          onClick={handleViewModeToggle}
-        >
-          View mode
-        </MainMenu.Item>
-        <MainMenu.Item
-          icon={<Coffee />}
-          onClick={handleZenModeToggle}
-        >
-          Zen mode
-        </MainMenu.Item>
-
-      </MainMenu.Group>
       
       <MainMenu.Separator />
       
@@ -282,28 +292,7 @@ export const MainMenuConfig: React.FC<MainMenuConfigProps> = ({
       
       <MainMenu.Item
           icon={<LogOut />}
-          onClick={async () => {
-            capture('logout_clicked');
-            
-            try {
-              // Call the logout endpoint but don't follow the redirect
-              await fetch('/auth/logout', { 
-                method: 'GET',
-                credentials: 'include' 
-              });
-              
-              // Clear the session_id cookie client-side
-              document.cookie = "session_id=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
-              
-              // Invalidate auth query to show the AuthModal
-              queryClient.invalidateQueries({ queryKey: ['auth'] });
-              queryClient.invalidateQueries({ queryKey: ['userProfile'] });
-              
-              console.log("Logged out successfully");
-            } catch (error) {
-              console.error("Logout failed:", error);
-            }
-          }}
+          onClick={handleLogout}
         >
           Logout
         </MainMenu.Item>
