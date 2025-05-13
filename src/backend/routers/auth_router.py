@@ -1,6 +1,6 @@
 import secrets
 import httpx
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.responses import RedirectResponse, FileResponse, JSONResponse
 import os
 import jwt
@@ -15,10 +15,10 @@ from config import (
     delete_session,
     get_session,
 )
+from dependencies import get_coder_api
 from coder import CoderAPI
 
 auth_router = APIRouter()
-coder_api = CoderAPI()
 
 
 @auth_router.get("/login-old")
@@ -55,7 +55,12 @@ async def newLogin(request: Request, popup: str = None):
 
 
 @auth_router.get("/callback")
-async def callback(request: Request, code: str, state: str = "default"):
+async def callback(
+    request: Request,
+    code: str,
+    state: str = "default",
+    coder_api: CoderAPI = Depends(get_coder_api),
+):
     session_id = request.cookies.get("session_id")
     if not session_id:
         raise HTTPException(status_code=400, detail="No session")
@@ -110,15 +115,12 @@ async def logout(request: Request):
     # Delete the session from Redis
     delete_session(session_id)
 
-    # Create the Keycloak logout URL with redirect back to our app
-    logout_url = f"{OIDC_CONFIG['server_url']}/realms/{OIDC_CONFIG['realm']}/protocol/openid-connect/logout"
+    # Create the OIDC logout URL with redirect back to our app
+    logout_url = OIDC_CONFIG["end_session_endpoint"]
     redirect_uri = OIDC_CONFIG[
         "frontend_url"
     ]  # Match the frontend redirect URI
     full_logout_url = f"{logout_url}?id_token_hint={id_token}&post_logout_redirect_uri={redirect_uri}"
-
-    logout_url = OIDC_CONFIG["end_session_endpoint"]
-    redirect_uri = request.base_url._url
 
     # Create a redirect response to Keycloak's logout endpoint
     response = JSONResponse(
