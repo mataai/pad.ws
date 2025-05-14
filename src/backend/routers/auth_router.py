@@ -37,18 +37,11 @@ async def login(request: Request, kc_idp_hint: str = None, popup: str = None):
 @auth_router.get("/login")
 async def newLogin(request: Request, popup: str = None):
     session_id = secrets.token_urlsafe(32)
-    state = "popup" if popup == "1" else "default"
-    responseParams = {
-        "client_id": OIDC_CLIENT_ID,
-        "response_type": "code",
-        "redirect_uri": request.base_url._url + "auth/callback",
-        "scope": "openid profile email offline_access",
-        "state": state,
-    }
-    authorization_url = OIDC_CONFIG["authorization_endpoint"]
-    authorization_url += "?" + "&".join(
-        f"{key}={value}" for key, value in responseParams.items()
-    )
+        
+    authorization_url = get_auth_url()
+    if popup == "1":
+        authorization_url += "&state=popup"
+        
     response = RedirectResponse(authorization_url)
     response.set_cookie("session_id", session_id)
     return response

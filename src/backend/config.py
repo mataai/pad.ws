@@ -97,7 +97,7 @@ def delete_session(session_id: str) -> None:
 
 
 def get_auth_url() -> str:
-    """Generate the authentication URL for Keycloak login"""
+    """Generate the authentication URL for OIDC login"""
     responseParams = {
         "client_id": OIDC_CLIENT_ID,
         "response_type": "code",
