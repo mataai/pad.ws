@@ -19,10 +19,6 @@ export default defineConfig(({ mode }) => {
         },
       },
     },
-    define: {
-      // Make non-prefixed CODER_URL available to import.meta.env
-      'import.meta.env.CODER_URL': JSON.stringify(env.CODER_URL),
-    },
     publicDir: "public",
     optimizeDeps: {
       esbuildOptions: {

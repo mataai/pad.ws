@@ -1,144 +1,163 @@
 from uuid import UUID
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel
 
-from dependencies import UserSession, require_auth
-from database import get_pad_service, get_backup_service, get_template_pad_service
-from database.service import PadService, BackupService, TemplatePadService
-from config import MAX_BACKUPS_PER_USER, MIN_INTERVAL_MINUTES, DEFAULT_PAD_NAME, DEFAULT_TEMPLATE_NAME
+from dependencies import UserSession, require_auth, require_pad_access, require_pad_owner
+from database.models import PadStore
+from database.database import get_session
+from domain.pad import Pad
+from domain.user import User
+
 pad_router = APIRouter()
 
+# Request models
+class RenameRequest(BaseModel):
+    display_name: str
 
-@pad_router.post("")
-async def save_canvas(
-    data: Dict[str, Any], 
+class SharingPolicyUpdate(BaseModel):
+    policy: str  # "private", "whitelist", or "public"
+
+class WhitelistUpdate(BaseModel):
+    user_id: UUID
+
+@pad_router.post("/new")
+async def create_new_pad(
     user: UserSession = Depends(require_auth),
-    pad_service: PadService = Depends(get_pad_service),
-    backup_service: BackupService = Depends(get_backup_service),
-):
-    """Save canvas data for the authenticated user"""
+    session: AsyncSession = Depends(get_session)
+) -> Dict[str, Any]:
+    """Create a new pad for the authenticated user"""
     try:
-        # Check if user already has a pad
-        user_pads = await pad_service.get_pads_by_owner(user.id)
-        
-        if not user_pads:
-            # Create a new pad if user doesn't have one
-            pad = await pad_service.create_pad(
-                owner_id=user.id,
-                display_name=DEFAULT_PAD_NAME,
-                data=data
-            )
-        else:
-            # Update existing pad
-            pad = user_pads[0]  # Use the first pad (assuming one pad per user for now)
-            await pad_service.update_pad_data(pad["id"], data)
-            
-        # Create a backup only if needed (if none exist or latest is > 5 min old)
-        await backup_service.create_backup_if_needed(
-            source_id=pad["id"], 
-            data=data,
-            min_interval_minutes=MIN_INTERVAL_MINUTES,
-            max_backups=MAX_BACKUPS_PER_USER
-        )
-        
-        return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save canvas data: {str(e)}")
-
-
-@pad_router.get("")
-async def get_canvas(
-    user: UserSession = Depends(require_auth),
-    pad_service: PadService = Depends(get_pad_service),
-    template_pad_service: TemplatePadService = Depends(get_template_pad_service),
-    backup_service: BackupService = Depends(get_backup_service)
-):
-    """Get canvas data for the authenticated user"""
-    try:
-        # Get user's pads
-        user_pads = await pad_service.get_pads_by_owner(user.id)
-        
-        if not user_pads:
-            # Return default canvas if user doesn't have a pad
-            return await create_pad_from_template(
-                name=DEFAULT_TEMPLATE_NAME, 
-                display_name=DEFAULT_PAD_NAME, 
-                user=user, 
-                pad_service=pad_service, 
-                template_pad_service=template_pad_service,
-                backup_service=backup_service
-            )
-        
-        # Return the first pad's data (assuming one pad per user for now)
-        return user_pads[0]["data"]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get canvas data: {str(e)}")
-
-
-@pad_router.post("/from-template/{name}")
-async def create_pad_from_template(
-    name: str,
-    display_name: str = DEFAULT_PAD_NAME,
-    user: UserSession = Depends(require_auth),
-    pad_service: PadService = Depends(get_pad_service),
-    template_pad_service: TemplatePadService = Depends(get_template_pad_service),
-    backup_service: BackupService = Depends(get_backup_service)
-):
-    """Create a new pad from a template"""
-
-    try:
-        # Get the template
-        template = await template_pad_service.get_template_by_name(name)
-        if not template:
-            raise HTTPException(status_code=404, detail="Template not found")
-        
-        # Create a new pad using the template data
-        pad = await pad_service.create_pad(
+        pad = await Pad.create(
+            session=session,
             owner_id=user.id,
-            display_name=display_name,
-            data=template["data"]
+            display_name="New pad"
         )
-        
-        # Create an initial backup for the new pad
-        await backup_service.create_backup_if_needed(
-            source_id=pad["id"],
-            data=template["data"],
-            min_interval_minutes=0,  # Always create initial backup
-            max_backups=MAX_BACKUPS_PER_USER
-        )
-        
-        return pad
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        return pad.to_dict()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create pad from template: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create new pad: {str(e)}"
+        )
 
-
-@pad_router.get("/recent")
-async def get_recent_canvas_backups(
-    limit: int = MAX_BACKUPS_PER_USER, 
-    user: UserSession = Depends(require_auth),
-    backup_service: BackupService = Depends(get_backup_service)
-):
-    """Get the most recent canvas backups for the authenticated user"""
-    # Limit the number of backups to the maximum configured value
-    if limit > MAX_BACKUPS_PER_USER:
-        limit = MAX_BACKUPS_PER_USER
-    
+@pad_router.get("/{pad_id}")
+async def get_pad(
+    pad_access: Tuple[Pad, UserSession] = Depends(require_pad_access),
+    session: AsyncSession = Depends(get_session)
+) -> Dict[str, Any]:
+    """Get a specific pad for the authenticated user"""
     try:
-        # Get backups directly with a single query
-        backups_data = await backup_service.get_backups_by_user(user.id, limit)
-        
-        # Format backups to match the expected response format
-        backups = []
-        for backup in backups_data:
-            backups.append({
-                "id": backup["id"],
-                "timestamp": backup["created_at"],
-                "data": backup["data"]
-            })
-        
-        return {"backups": backups}
+        pad, user = pad_access
+            
+        # Update the user's last selected pad
+        user_obj = await User.get_by_id(session, user.id)
+        if user_obj:
+            await user_obj.set_last_selected_pad(session, pad.id)
+            
+        pad_dict = pad.to_dict()
+        # Get only this user's appState
+        user_app_state = pad_dict["data"]["appState"].get(str(user.id), {})
+        pad_dict["data"]["appState"] = user_app_state
+        return pad_dict["data"]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get canvas backups: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get pad: {str(e)}"
+        )
+
+@pad_router.put("/{pad_id}/rename")
+async def rename_pad(
+    rename_data: RenameRequest,
+    pad_access: Tuple[Pad, UserSession] = Depends(require_pad_owner),
+    session: AsyncSession = Depends(get_session)
+) -> Dict[str, Any]:
+    """Rename a pad (owner only)"""
+    try:
+        pad, _ = pad_access
+        await pad.rename(session, rename_data.display_name)
+        return pad.to_dict()
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to rename pad: {str(e)}"
+        )
+
+@pad_router.delete("/{pad_id}")
+async def delete_pad(
+    pad_access: Tuple[Pad, UserSession] = Depends(require_pad_owner),
+    session: AsyncSession = Depends(get_session)
+) -> Dict[str, Any]:
+    """Delete a pad (owner only)"""
+    try:
+        pad, _ = pad_access
+        success = await pad.delete(session)
+        if not success:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to delete pad"
+            )
+        
+        return {"success": True, "message": "Pad deleted successfully"}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete pad: {str(e)}"
+        )
+
+@pad_router.put("/{pad_id}/sharing")
+async def update_sharing_policy(
+    policy_update: SharingPolicyUpdate,
+    pad_access: Tuple[Pad, UserSession] = Depends(require_pad_owner),
+    session: AsyncSession = Depends(get_session)
+) -> Dict[str, Any]:
+    """Update the sharing policy of a pad (owner only)"""
+    try:
+        pad, _ = pad_access
+        await pad.set_sharing_policy(session, policy_update.policy)
+        return pad.to_dict()
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update sharing policy: {str(e)}"
+        )
+
+@pad_router.post("/{pad_id}/whitelist")
+async def add_to_whitelist(
+    whitelist_update: WhitelistUpdate,
+    pad_access: Tuple[Pad, UserSession] = Depends(require_pad_owner),
+    session: AsyncSession = Depends(get_session)
+) -> Dict[str, Any]:
+    """Add a user to the pad's whitelist (owner only)"""
+    try:
+        pad, _ = pad_access
+        await pad.add_to_whitelist(session, whitelist_update.user_id)
+        return pad.to_dict()
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to add user to whitelist: {str(e)}"
+        )
+
+@pad_router.delete("/{pad_id}/whitelist/{user_id}")
+async def remove_from_whitelist(
+    user_id: UUID,
+    pad_access: Tuple[Pad, UserSession] = Depends(require_pad_owner),
+    session: AsyncSession = Depends(get_session)
+) -> Dict[str, Any]:
+    """Remove a user from the pad's whitelist (owner only)"""
+    try:
+        pad, _ = pad_access
+        await pad.remove_from_whitelist(session, user_id)
+        return pad.to_dict()
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to remove user from whitelist: {str(e)}"
+        )

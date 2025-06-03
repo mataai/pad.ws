@@ -1,120 +1,117 @@
-import React, { useState, useCallback, useEffect, useRef } from "react";
-import { useCanvas, useDefaultCanvas, useUserProfile } from "./api/hooks";
-import { ExcalidrawWrapper } from "./ExcalidrawWrapper";
-import { debounce } from "./utils/debounce";
-import posthog from "./utils/posthog";
-import { normalizeCanvasData } from "./utils/canvasUtils";
-import { useSaveCanvas } from "./api/hooks";
-import type * as TExcalidraw from "@atyrode/excalidraw";
-import type { NonDeletedExcalidrawElement } from "@atyrode/excalidraw/element/types";
+import React, { useState, useEffect } from "react";
+import { Excalidraw, MainMenu, Footer } from "@atyrode/excalidraw";
 import type { ExcalidrawImperativeAPI, AppState } from "@atyrode/excalidraw/types";
-import { useAuthCheck } from "./api/hooks";
+import type { ExcalidrawEmbeddableElement, NonDeleted } from "@atyrode/excalidraw/element/types";
 
-export interface AppProps {
-  useCustom: (api: ExcalidrawImperativeAPI | null, customArgs?: any[]) => void;
-  customArgs?: any[];
-  children?: React.ReactNode;
-  excalidrawLib: typeof TExcalidraw;
-}
+// Hooks
+import { useAuthStatus } from "./hooks/useAuthStatus";
+import { usePadTabs } from "./hooks/usePadTabs";
+import { useCallbackRefState } from "./hooks/useCallbackRefState";
+import { useAppConfig } from "./hooks/useAppConfig";
 
-export default function App({
-  useCustom,
-  customArgs,
-  children,
-  excalidrawLib,
-}: AppProps) {
-  const { useHandleLibrary, MainMenu } = excalidrawLib;
+// Components
+import DiscordButton from './ui/DiscordButton';
+import { MainMenuConfig } from './ui/MainMenu';
+import AuthDialog from './ui/AuthDialog';
+import Collab from './lib/collab/Collab';
 
-  const { data: isAuthenticated, isLoading: isAuthLoading } = useAuthCheck();
-  const { data: userProfile } = useUserProfile();
+// Utils
+import { initializePostHog } from "./lib/posthog";
+import { lockEmbeddables, renderCustomEmbeddable } from './CustomEmbeddableRenderer';
+import Tabs from "./ui/Tabs";
+import { INITIAL_APP_DATA, HIDDEN_UI_ELEMENTS } from "./constants";
 
-  // Only enable canvas queries if authenticated and not loading
-  const { data: canvasData } = useCanvas({
-    queryKey: ['canvas'],
-    enabled: isAuthenticated === true && !isAuthLoading,
-    retry: 1,
-  });
+export default function App() {
+  const { config, configError } = useAppConfig();
+  const { isAuthenticated, isLoading: isLoadingAuth, user } = useAuthStatus();
 
-  // Excalidraw API ref
-  const [excalidrawAPI, setExcalidrawAPI] = useState<ExcalidrawImperativeAPI | null>(null);
-  useCustom(excalidrawAPI, customArgs);
-  useHandleLibrary({ excalidrawAPI });
+  const {
+    tabs,
+    selectedTabId,
+    isLoading: isLoadingTabs,
+    createNewPadAsync,
+    isCreating: isCreatingPad,
+    renamePad,
+    deletePad,
+    selectTab,
+    updateSharingPolicy,
+    leaveSharedPad
+  } = usePadTabs(isAuthenticated);
 
-  useEffect(() => {
-    if (excalidrawAPI && canvasData) {
-      excalidrawAPI.updateScene(normalizeCanvasData(canvasData));
-    }
-  }, [excalidrawAPI, canvasData]);
+  const [excalidrawAPI, excalidrawRefCallback] = useCallbackRefState<ExcalidrawImperativeAPI>();
 
-  const { mutate: saveCanvas } = useSaveCanvas({
-    onSuccess: () => {
-      console.debug("[pad.ws] Canvas saved to database successfully");
-    },
-    onError: (error) => {
-      console.error("[pad.ws] Failed to save canvas to database:", error);
-    }
-  });
-
+  const handleOnScrollChange = () => {
+    lockEmbeddables(excalidrawAPI?.getAppState());
+  };
 
   useEffect(() => {
-    if (excalidrawAPI) {
-      (window as any).excalidrawAPI = excalidrawAPI;
+    if (!config?.devMode && config?.posthogKey && config?.posthogHost) {
+      initializePostHog({
+        posthogKey: config.posthogKey,
+        posthogHost: config.posthogHost,
+      });
+    } else if (configError) {
+      console.error('[pad.ws] Failed to load app config:', configError);
     }
-    return () => {
-      (window as any).excalidrawAPI = null;
-    };
-  }, [excalidrawAPI]);
-
-  const lastSentCanvasDataRef = useRef<string>("");
-
-  const debouncedLogChange = useCallback(
-    debounce(
-      (elements: NonDeletedExcalidrawElement[], state: AppState, files: any) => {
-        if (!isAuthenticated) return;
-
-        const canvasData = {
-          elements,
-          appState: state,
-          files
-        };
-
-        const serialized = JSON.stringify(canvasData);
-        if (serialized !== lastSentCanvasDataRef.current) {
-          lastSentCanvasDataRef.current = serialized;
-          saveCanvas(canvasData);
-        }
-      },
-      1200
-    ),
-    [saveCanvas, isAuthenticated]
-  );
-
-  useEffect(() => {
-    if (userProfile?.id) {
-      posthog.identify(userProfile.id);
-      if (posthog.people && typeof posthog.people.set === "function") {
-        const {
-          id, // do not include in properties
-          ...personProps
-        } = userProfile;
-        posthog.people.set(personProps);
-      }
-    }
-  }, [userProfile]);
+  }, [config, configError]);
 
   return (
     <>
-      <ExcalidrawWrapper
-        excalidrawAPI={excalidrawAPI}
-        setExcalidrawAPI={setExcalidrawAPI}
-        onChange={debouncedLogChange}
-        MainMenu={MainMenu}
-        isAuthenticated={isAuthenticated}
-        isAuthLoading={isAuthLoading}
+      <Excalidraw
+        excalidrawAPI={excalidrawRefCallback}
+        initialData={INITIAL_APP_DATA}
+        UIOptions={{
+          hiddenElements: HIDDEN_UI_ELEMENTS,
+        }}
+        onScrollChange={handleOnScrollChange}
+        validateEmbeddable={true}
+        renderEmbeddable={(element: NonDeleted<ExcalidrawEmbeddableElement>, appState: AppState) => {
+          return renderCustomEmbeddable(element, appState, excalidrawAPI);
+        }}
+        renderTopRightUI={() => (
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            <DiscordButton />
+          </div>
+        )}
       >
-        {children}
-      </ExcalidrawWrapper>
+        <MainMenuConfig
+          MainMenu={MainMenu}
+          excalidrawAPI={excalidrawAPI}
+        />
 
+        {!isLoadingAuth && !isAuthenticated && (
+          <AuthDialog />
+        )}
+
+        {excalidrawAPI && (
+          <Footer>
+            {isAuthenticated && (
+              <Tabs
+                excalidrawAPI={excalidrawAPI}
+                tabs={tabs}
+                selectedTabId={selectedTabId}
+                isLoading={isLoadingTabs}
+                isCreatingPad={isCreatingPad}
+                createNewPadAsync={createNewPadAsync}
+                renamePad={renamePad}
+                deletePad={deletePad}
+                leaveSharedPad={leaveSharedPad}
+                updateSharingPolicy={updateSharingPolicy}
+                selectTab={selectTab}
+              />
+            )}
+          </Footer>
+        )}
+        {excalidrawAPI && user && (
+          <Collab
+            excalidrawAPI={excalidrawAPI}
+            user={user}
+            isOnline={!!isAuthenticated}
+            isLoadingAuth={isLoadingAuth}
+            padId={selectedTabId}
+          />
+        )}
+      </Excalidraw>
     </>
   );
 }

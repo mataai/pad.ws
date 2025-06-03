@@ -1,13 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { Lock } from 'lucide-react';
-import { debounce } from './utils/debounce';
+import { debounce } from './lib/debounce';
 import type { NonDeleted, ExcalidrawEmbeddableElement } from '@atyrode/excalidraw/element/types';
 import type { AppState } from '@atyrode/excalidraw/types';
 import {
   Dashboard,
   StateIndicator,
   ControlButton,
-  HtmlEditor,
   Editor,
   Terminal,
 } from './pad';
@@ -28,11 +27,15 @@ export const renderCustomEmbeddable = (
 
     switch (path) {
       case 'html':
-        content = <HtmlEditor element={element} appState={appState} excalidrawAPI={excalidrawAPI} />;
+        content = <Editor 
+          element={element} 
+          language="html" 
+          excalidrawAPI={excalidrawAPI} 
+        />;
         title = "HTML Editor";
         break;
       case 'editor':
-        content = <Editor element={element} appState={appState} excalidrawAPI={excalidrawAPI} />;
+        content = <Editor element={element} excalidrawAPI={excalidrawAPI} />;
         title = "Code Editor";
         break;
       case 'terminal':
